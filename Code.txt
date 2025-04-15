@@ -1,0 +1,294 @@
+# load_data.py
+import csv
+import datetime
+import os
+from google.cloud import bigtable
+
+# Configuration
+PROJECT_ID = "elevated-nature-443722-s9"
+INSTANCE_ID = "ev-bigtable"
+TABLE_ID = "ev-population"
+COLUMN_FAMILY_ID = "ev_info"
+CSV_FILE_PATH = "Electric_Vehicle_Population_Data.csv"
+BATCH_SIZE = 1000
+
+# Bigtable Connection
+print("Connecting to Bigtable...")
+try:
+    client = bigtable.Client(project=PROJECT_ID, admin=True)
+    instance = client.instance(INSTANCE_ID)
+    table = instance.table(TABLE_ID)
+    print(f"Successfully connected to Bigtable instance '{INSTANCE_ID}' and table '{TABLE_ID}'")
+except Exception as e:
+    print(f"Error: Could not connect to Bigtable.")
+    print(f"Details: {e}")
+    exit()
+
+# Data Loading
+rows_to_mutate = []
+rows_processed = 0
+rows_skipped = 0
+
+print(f"\nStarting data loading from '{CSV_FILE_PATH}'...")
+
+try:
+    with open(CSV_FILE_PATH, mode='r', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile)
+        # Assuming headers in the file exactly match these:
+        required_headers = ['DOL Vehicle ID', 'Make', 'Model', 'Model Year', 'Electric Range', 'City', 'County']
+        header = reader.fieldnames
+
+        if not header:
+            print(f"Error: Could not read header row from CSV file '{CSV_FILE_PATH}'.")
+            exit()
+        print("Processing rows...")
+
+        for row_data in reader:
+            try:
+                row_key_str = row_data.get('DOL Vehicle ID', '').strip()
+                if not row_key_str:
+                    rows_skipped += 1
+                    continue
+
+                # Encode strings to bytes for Bigtable library (using UTF-8 is standard)
+                row_key_bytes = row_key_str.encode('utf-8')
+                make = row_data.get('Make', '').strip().encode('utf-8')
+                model = row_data.get('Model', '').strip().encode('utf-8')
+                model_year = row_data.get('Model Year', '').strip().encode('utf-8')
+                electric_range = row_data.get('Electric Range', '').strip().encode('utf-8')
+                city = row_data.get('City', '').strip().encode('utf-8')
+                county = row_data.get('County', '').strip().encode('utf-8')
+
+                # Create Bigtable Row Mutation
+                row_mutation = table.direct_row(row_key_bytes)
+
+                # Set cell values
+                row_mutation.set_cell(COLUMN_FAMILY_ID, b'make', make)
+                row_mutation.set_cell(COLUMN_FAMILY_ID, b'model', model)
+                row_mutation.set_cell(COLUMN_FAMILY_ID, b'model year', model_year)
+                row_mutation.set_cell(COLUMN_FAMILY_ID, b'electric range', electric_range)
+                row_mutation.set_cell(COLUMN_FAMILY_ID, b'city', city)
+                row_mutation.set_cell(COLUMN_FAMILY_ID, b'county', county)
+
+                rows_to_mutate.append(row_mutation)
+                rows_processed += 1
+
+                # Send Batch Mutation
+                if len(rows_to_mutate) >= BATCH_SIZE:
+                    table.mutate_rows(rows_to_mutate)
+                    rows_to_mutate = []
+
+            except Exception as e:
+                # Catch errors during processing of a single row
+                print(f"Warning: Error processing row with key '{row_key_str}': {e}. Skipping row.")
+                rows_skipped += 1
+
+    # Mutate Final Batch
+    if rows_to_mutate:
+        print(f"Mutating final batch of {len(rows_to_mutate)} rows (Total processed: {rows_processed})...")
+        table.mutate_rows(rows_to_mutate)
+
+    # Completion Summary
+    print("\n--------------------------------------------------")
+    print("Finished loading data.")
+
+
+except FileNotFoundError:
+    print(f"\nError: The file '{CSV_FILE_PATH}' was not found.")
+    print("Please ensure the CSV file exists in the same directory as the script.")
+except Exception as e:
+    # General catch block for other errors (like potential UnicodeDecodeError)
+    print(f"\nAn unexpected error occurred:")
+    print(f"Details: {e}")
+
+
+# app.py
+import datetime
+import os
+from flask import Flask, jsonify
+from google.cloud import bigtable
+from google.cloud.bigtable.row_filters import ColumnQualifierRegexFilter, ValueRegexFilter, RowFilterChain, CellsRowLimitFilter # CORRECTED IMPORT
+
+
+app = Flask(__name__)
+
+PROJECT_ID = "elevated-nature-443722-s9"
+INSTANCE_ID = "ev-bigtable"
+TABLE_ID = "ev-population"
+COLUMN_FAMILY_ID = "ev_info"
+
+# Bigtable Client Initialization
+try:
+    client = bigtable.Client(project=PROJECT_ID, admin=True)
+    instance = client.instance(INSTANCE_ID)
+    table = instance.table(TABLE_ID)
+    print(f"Successfully connected to Bigtable: {PROJECT_ID}/{INSTANCE_ID}/{TABLE_ID}")
+except Exception as e:
+    print(f"Error connecting to Bigtable: {e}")
+    client = None
+    instance = None
+    table = None
+
+# Helper function to read all row keys
+def get_all_row_keys(cbt_table):
+    # Scans the table and yields all row keys.
+    row_filter = CellsRowLimitFilter(1)
+    try:
+        for row in cbt_table.read_rows(filter_=row_filter):
+            yield row.row_key
+    except Exception as e:
+        print(f"Error reading row keys: {e}")
+        raise
+
+# API Endpoints
+@app.route('/')
+def index():
+    """Basic index route."""
+    return "EV Population Bigtable Query API"
+
+@app.route('/rows')
+def get_total_rows():
+    # Returns the total number of entries (rows) in the Bigtable table.
+    if not table: return "Error: Bigtable connection not established", 500
+    print("Processing /rows request...")
+    count = 0
+    try:
+        # Use the corrected helper function
+        for i in get_all_row_keys(table):
+            count += 1
+        print(f"/rows count: {count}")
+        return str(count)
+    except Exception as e:
+        print(f"Error in /rows: {e}")
+        return "Error processing request", 500
+
+@app.route('/Best-BMW')
+def get_best_bmw_count():
+    # Finds the count of BMW EVs with an electric range > 100 miles.
+    if not table: return "Error: Bigtable connection not established", 500
+    print("Processing /Best-BMW request...")
+    count = 0
+    try:
+        # Using ColumnQualifierRegexFilter + ValueRegexFilter for make='BMW'
+        make_col_filter = ColumnQualifierRegexFilter(b'make')
+        make_val_filter = ValueRegexFilter(b'BMW')
+        make_filter = RowFilterChain(filters=[make_col_filter, make_val_filter])
+
+        for row in table.read_rows(filter_=make_filter):
+            cell = row.cells[COLUMN_FAMILY_ID].get(b'electric range')
+            if cell:
+                range_bytes = cell[0].value
+                try:
+                    electric_range = int(range_bytes.decode('utf-8'))
+                    if electric_range > 100:
+                        count += 1
+                except (ValueError, UnicodeDecodeError):
+                    pass
+        print(f"/Best-BMW count: {count}")
+        return str(count)
+    except Exception as e:
+        print(f"Error in /Best-BMW: {e}")
+        return "Error processing request", 500
+
+@app.route('/tesla-owners')
+def get_tesla_seattle_count():
+    # Retrieves the count of all Tesla vehicles registered in Seattle.
+    if not table: return "Error: Bigtable connection not established", 500
+    print("Processing /tesla-owners request...")
+    count = 0
+    try:
+        # Same workaround as above for Tesla vehicles
+        make_col_filter = ColumnQualifierRegexFilter(b'make')
+        make_val_filter = ValueRegexFilter(b'Tesla')
+        tesla_filter = RowFilterChain(filters=[make_col_filter, make_val_filter])
+
+        for row in table.read_rows(filter_=tesla_filter):
+            city_cell = row.cells[COLUMN_FAMILY_ID].get(b'city')
+            if city_cell and city_cell[0].value == b'Seattle':
+                 count += 1
+
+        print(f"/tesla-owners count: {count}")
+        return str(count)
+    except Exception as e:
+        print(f"Error in /tesla-owners: {e}")
+        return "Error processing request", 500
+
+@app.route('/update')
+def update_vehicle_range():
+    # Updates the electric range of vehicle with DOL ID 257246118 to 200 miles.
+    if not table: return "Error: Bigtable connection not established", 500
+    print("Processing /update request...")
+    row_key_to_update = b"257246118"
+    new_range_value = b"200"
+    try:
+        row_mutation = table.direct_row(row_key_to_update)
+        row_mutation.set_cell(
+            COLUMN_FAMILY_ID,
+            b'electric range',
+            new_range_value,
+            timestamp=datetime.datetime.utcnow()
+        )
+        row_mutation.commit() # Use commit()
+        print(f"Updated electric range for {row_key_to_update.decode('utf-8')}")
+        return "Success"
+    except Exception as e:
+        print(f"Error in /update for row {row_key_to_update.decode('utf-8')}: {e}")
+        return "Error processing update request", 500
+
+@app.route('/delete')
+def delete_old_vehicles_and_count():
+    # Deletes records with model year < 2014 and returns count of remaining records.
+    if not table: return "Error: Bigtable connection not established", 500
+    print("Processing /delete request...")
+    keys_to_delete = []
+    rows_scanned_for_delete = 0
+    min_year = 2014
+    batch_size = 500
+    try:
+        print(f"Scanning for rows with model year < {min_year}...")
+        scan_filter = ColumnQualifierRegexFilter(b'model year')
+        for row in table.read_rows(filter_=scan_filter):
+            rows_scanned_for_delete += 1
+            cell = row.cells[COLUMN_FAMILY_ID].get(b'model year')
+            if cell:
+                year_bytes = cell[0].value
+                try:
+                    model_year = int(year_bytes.decode('utf-8'))
+                    if model_year < min_year:
+                        keys_to_delete.append(row.row_key)
+                except (ValueError, UnicodeDecodeError):
+                     pass # Skip invalid year formats
+
+        print(f"Identified {len(keys_to_delete)} rows to delete.")
+
+        if keys_to_delete:
+            print("Deleting rows in batches...")
+            mutations_to_send = []
+            for i, key in enumerate(keys_to_delete):
+                row_mutation = table.direct_row(key)
+                row_mutation.delete()
+                mutations_to_send.append(row_mutation)
+                if len(mutations_to_send) >= batch_size or i == len(keys_to_delete) - 1:
+                    print(f"  ...sending delete batch of {len(mutations_to_send)} rows...")
+                    table.mutate_rows(mutations_to_send)
+                    mutations_to_send = []
+            print("Deletion complete.")
+        else:
+            print("No rows found matching deletion criteria.")
+
+        print("Counting remaining rows...")
+        remaining_count = 0
+        # Use helper with corrected filter name
+        for _ in get_all_row_keys(table):
+            remaining_count += 1
+        print(f"/delete remaining count: {remaining_count}")
+        return str(remaining_count)
+
+    except Exception as e:
+        print(f"Error in /delete: {e}")
+        return "Error processing delete request", 500
+
+# Run Flask App
+if __name__ == '__main__':
+    print("Starting Flask app")
+    app.run(host='0.0.0.0', port=8080, debug=False)
