@@ -30,7 +30,6 @@ rows_processed = 0
 rows_skipped = 0
 
 print(f"\nStarting data loading from '{CSV_FILE_PATH}'...")
-
 try:
     with open(CSV_FILE_PATH, mode='r', encoding='utf-8') as csvfile:
         reader = csv.DictReader(csvfile)
