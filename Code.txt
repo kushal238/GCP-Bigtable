@@ -107,22 +107,21 @@ import datetime
 import os
 from flask import Flask, jsonify
 from google.cloud import bigtable
-from google.cloud.bigtable.row_filters import ColumnQualifierRegexFilter, ValueRegexFilter, RowFilterChain, CellsRowLimitFilter # CORRECTED IMPORT
+from google.cloud.bigtable.row_filters import ColumnQualifierRegexFilter, CellsRowLimitFilter
 
-
+# Flask App Initialization
 app = Flask(__name__)
 
-PROJECT_ID = "elevated-nature-443722-s9"
+# Bigtable Configuration
+PROJECT_ID = "elevated-nature-443722-s9" # Project ID set by user
 INSTANCE_ID = "ev-bigtable"
-TABLE_ID = "ev-population"
-COLUMN_FAMILY_ID = "ev_info"
 
 # Bigtable Client Initialization
 try:
     client = bigtable.Client(project=PROJECT_ID, admin=True)
     instance = client.instance(INSTANCE_ID)
-    table = instance.table(TABLE_ID)
-    print(f"Successfully connected to Bigtable: {PROJECT_ID}/{INSTANCE_ID}/{TABLE_ID}")
+    table = instance.table("ev-population")
+    print(f"Successfully connected to Bigtable: {PROJECT_ID}/{INSTANCE_ID}/{"ev-population"}")
 except Exception as e:
     print(f"Error connecting to Bigtable: {e}")
     client = None
@@ -131,7 +130,6 @@ except Exception as e:
 
 # Helper function to read all row keys
 def get_all_row_keys(cbt_table):
-    # Scans the table and yields all row keys.
     row_filter = CellsRowLimitFilter(1)
     try:
         for row in cbt_table.read_rows(filter_=row_filter):
@@ -141,20 +139,18 @@ def get_all_row_keys(cbt_table):
         raise
 
 # API Endpoints
+
 @app.route('/')
 def index():
-    """Basic index route."""
     return "EV Population Bigtable Query API"
 
 @app.route('/rows')
 def get_total_rows():
-    # Returns the total number of entries (rows) in the Bigtable table.
     if not table: return "Error: Bigtable connection not established", 500
     print("Processing /rows request...")
     count = 0
     try:
-        # Use the corrected helper function
-        for i in get_all_row_keys(table):
+        for _ in get_all_row_keys(table):
             count += 1
         print(f"/rows count: {count}")
         return str(count)
@@ -162,60 +158,86 @@ def get_total_rows():
         print(f"Error in /rows: {e}")
         return "Error processing request", 500
 
+
 @app.route('/Best-BMW')
 def get_best_bmw_count():
-    # Finds the count of BMW EVs with an electric range > 100 miles.
     if not table: return "Error: Bigtable connection not established", 500
-    print("Processing /Best-BMW request...")
+    print("Processing /Best-BMW request (Full Client-side filter)...")
     count = 0
+    rows_processed = 0
+    bmws_found = 0
     try:
-        # Using ColumnQualifierRegexFilter + ValueRegexFilter for make='BMW'
-        make_col_filter = ColumnQualifierRegexFilter(b'make')
-        make_val_filter = ValueRegexFilter(b'BMW')
-        make_filter = RowFilterChain(filters=[make_col_filter, make_val_filter])
+        for row in table.read_rows():
+            rows_processed += 1
+            try:
+                family_data = row.cells.get("ev_info", {}) 
+                make_cell = family_data.get(b'make')
+                range_cell = family_data.get(b'electric range') 
 
-        for row in table.read_rows(filter_=make_filter):
-            cell = row.cells[COLUMN_FAMILY_ID].get(b'electric range')
-            if cell:
-                range_bytes = cell[0].value
-                try:
-                    electric_range = int(range_bytes.decode('utf-8'))
+                if not make_cell or not range_cell:
+                    continue
+
+                make = make_cell[0].value.decode('utf-8')
+                if make.lower() == 'bmw':
+                    bmws_found += 1
+                    range_bytes = range_cell[0].value
+                    range_str = range_bytes.decode('utf-8')
+
+                    if range_str == '':
+                        continue
+
+                    electric_range = int(range_str)
+
                     if electric_range > 100:
                         count += 1
-                except (ValueError, UnicodeDecodeError):
-                    pass
-        print(f"/Best-BMW count: {count}")
+
+            except (IndexError, KeyError, ValueError, AttributeError, UnicodeDecodeError) as e:
+                continue 
+
+        print(f"/Best-BMW processed {rows_processed} total rows, found {bmws_found} BMWs. Final count (>100 range): {count}")
         return str(count)
     except Exception as e:
         print(f"Error in /Best-BMW: {e}")
         return "Error processing request", 500
 
+
 @app.route('/tesla-owners')
-def get_tesla_seattle_count():
-    # Retrieves the count of all Tesla vehicles registered in Seattle.
+def get_tesla_owners_count():
     if not table: return "Error: Bigtable connection not established", 500
-    print("Processing /tesla-owners request...")
+    print("Processing /tesla-owners request (Full Client-side filter)...")
     count = 0
+    rows_processed = 0
     try:
-        # Same workaround as above for Tesla vehicles
-        make_col_filter = ColumnQualifierRegexFilter(b'make')
-        make_val_filter = ValueRegexFilter(b'Tesla')
-        tesla_filter = RowFilterChain(filters=[make_col_filter, make_val_filter])
+        for row in table.read_rows():
+            rows_processed += 1
 
-        for row in table.read_rows(filter_=tesla_filter):
-            city_cell = row.cells[COLUMN_FAMILY_ID].get(b'city')
-            if city_cell and city_cell[0].value == b'Seattle':
-                 count += 1
+            try:
+                family_data = row.cells.get("ev_info", {})
+                make_cell = family_data.get(b'make')
+                city_cell = family_data.get(b'city')
 
-        print(f"/tesla-owners count: {count}")
+                if not make_cell or not city_cell:
+                    continue
+
+                make = make_cell[0].value.decode('utf-8')
+                city = city_cell[0].value.decode('utf-8')
+
+                if make.lower() == 'tesla' and city.lower() == 'seattle':
+                     count += 1
+
+            except (IndexError, KeyError, AttributeError, UnicodeDecodeError) as e:
+                continue 
+
+        print(f"/tesla-owners processed {rows_processed} rows. Final count: {count}")
         return str(count)
     except Exception as e:
         print(f"Error in /tesla-owners: {e}")
         return "Error processing request", 500
 
+
+
 @app.route('/update')
 def update_vehicle_range():
-    # Updates the electric range of vehicle with DOL ID 257246118 to 200 miles.
     if not table: return "Error: Bigtable connection not established", 500
     print("Processing /update request...")
     row_key_to_update = b"257246118"
@@ -223,21 +245,19 @@ def update_vehicle_range():
     try:
         row_mutation = table.direct_row(row_key_to_update)
         row_mutation.set_cell(
-            COLUMN_FAMILY_ID,
-            b'electric range',
-            new_range_value,
+            "ev_info", b'electric range', new_range_value,
             timestamp=datetime.datetime.utcnow()
         )
-        row_mutation.commit() # Use commit()
+        row_mutation.commit()
         print(f"Updated electric range for {row_key_to_update.decode('utf-8')}")
         return "Success"
     except Exception as e:
         print(f"Error in /update for row {row_key_to_update.decode('utf-8')}: {e}")
         return "Error processing update request", 500
 
+
 @app.route('/delete')
 def delete_old_vehicles_and_count():
-    # Deletes records with model year < 2014 and returns count of remaining records.
     if not table: return "Error: Bigtable connection not established", 500
     print("Processing /delete request...")
     keys_to_delete = []
@@ -249,7 +269,7 @@ def delete_old_vehicles_and_count():
         scan_filter = ColumnQualifierRegexFilter(b'model year')
         for row in table.read_rows(filter_=scan_filter):
             rows_scanned_for_delete += 1
-            cell = row.cells[COLUMN_FAMILY_ID].get(b'model year')
+            cell = row.cells["ev_info"].get(b'model year')
             if cell:
                 year_bytes = cell[0].value
                 try:
@@ -257,7 +277,7 @@ def delete_old_vehicles_and_count():
                     if model_year < min_year:
                         keys_to_delete.append(row.row_key)
                 except (ValueError, UnicodeDecodeError):
-                     pass # Skip invalid year formats
+                     pass
 
         print(f"Identified {len(keys_to_delete)} rows to delete.")
 
@@ -269,16 +289,15 @@ def delete_old_vehicles_and_count():
                 row_mutation.delete()
                 mutations_to_send.append(row_mutation)
                 if len(mutations_to_send) >= batch_size or i == len(keys_to_delete) - 1:
-                    print(f"  ...sending delete batch of {len(mutations_to_send)} rows...")
+                    print(f"sending delete batch of {len(mutations_to_send)} rows...")
                     table.mutate_rows(mutations_to_send)
                     mutations_to_send = []
             print("Deletion complete.")
         else:
-            print("No rows found matching deletion criteria.")
+            print("No rows found matching deletion.")
 
         print("Counting remaining rows...")
         remaining_count = 0
-        # Use helper with corrected filter name
         for _ in get_all_row_keys(table):
             remaining_count += 1
         print(f"/delete remaining count: {remaining_count}")
@@ -290,5 +309,5 @@ def delete_old_vehicles_and_count():
 
 # Run Flask App
 if __name__ == '__main__':
-    print("Starting Flask app")
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    print("Starting Flask app on http://0.0.0.0:80")
+    app.run(host='0.0.0.0', port=80, debug=False)
